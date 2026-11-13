@@ -109,12 +109,26 @@ jobs:
       - name: 拉取源码
         uses: actions/checkout@v4
 
-      - name: 安装 aarch64 交叉工具链
+      - name: 安装 aarch64 交叉工具链与 qemu-user
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y cmake build-essential \
-              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-              qemu-user-static file
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu file
+          # 不同 Ubuntu 版本里 qemu user 的包名不一致：
+          # 24.04+ 的 qemu-user-static 是虚拟包，实际由 qemu-user / qemu-user-binfmt 提供。
+          # 逐个尝试，任一成功即可，再用命令探测真正可用的可执行文件名。
+          sudo apt-get install -y qemu-user-static 2>/dev/null || \
+            sudo apt-get install -y qemu-user 2>/dev/null || \
+            sudo apt-get install -y qemu-user-binfmt 2>/dev/null || true
+          AOS_QEMU=""
+          for c in qemu-aarch64-static qemu-aarch64; do
+            if command -v "$c" >/dev/null 2>&1; then AOS_QEMU="$c"; break; fi
+          done
+          if [ -z "$AOS_QEMU" ]; then
+            echo "找不到 qemu-aarch64 可执行文件，无法验证闭环"; exit 1
+          fi
+          echo "检测到：$AOS_QEMU"
+          echo "AOS_QEMU=$AOS_QEMU" >> "$GITHUB_ENV"
 
       - name: 用工具链文件配置交叉构建
         run: |
@@ -145,7 +159,7 @@ jobs:
           echo "qemu-user 只用于 CI 验证闭环逻辑，绝不进入产品运行路径；"
           echo "真 ARM64 设备上 guest 的 arm64 指令由硬件原生执行，零指令转译。"
           echo "── 执行两套内置样本 ──"
-          qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+          "$AOS_QEMU" -L /usr/aarch64-linux-gnu \
               ./build-a64/aos-run --selftest | tee /tmp/aos_run.log
           echo "── 校验关键结果 ──"
           grep -q "A-OS NATIVE OK" /tmp/aos_run.log
