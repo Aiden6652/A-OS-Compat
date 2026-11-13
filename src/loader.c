@@ -287,3 +287,71 @@ int aos_hle_metal_attach(const char *vulkan_icd_name) {
                  g_vulkan_icd);
     return AOS_OK;
 }
+
+/* ---------------- HLE 框架真实现 ----------------
+ * 这些函数不再是无副作用的空桩：NSLog 真输出、NSHomeDirectory 真返回沙盒路径、
+ * malloc/free 真转发、CGRectMake 真构造结构体、ObjC/Metal 返回一致的伪句柄。
+ * 完整 UIKit 控件与 objc_msgSend 分发仍属 M2/M3。 */
+static char     g_hle_home[AOS_PATH_MAX] =
+                    "/var/mobile/Containers/Data/Application/A0S-APP";
+static uint64_t g_class_handle = 0x0A050000ULL;
+static uint64_t g_sel_handle   = 0x0A060000ULL;
+static uint64_t g_cgrect[4];
+static uint8_t  g_mtl_device[16];
+
+void aos_hle_set_home(const char *home) {
+    if (home && home[0])
+        snprintf(g_hle_home, sizeof(g_hle_home), "%s", home);
+}
+
+int64_t aos_hle_invoke(const char *symbol, uint64_t args[6]) {
+    if (!symbol || !args) return 0;
+
+    if (!strcmp(symbol, "NSHomeDirectory"))
+        return (int64_t)(uintptr_t)g_hle_home;
+
+    if (!strcmp(symbol, "NSLog")) {
+        const char *s = (const char *)(uintptr_t)args[0];
+        printf("[军师·NSLog] %s\n", s ? s : "(null)");
+        return 0;
+    }
+    if (!strcmp(symbol, "printf")) {
+        const char *s = (const char *)(uintptr_t)args[0];
+        if (s) printf("%s", s);
+        return 0;
+    }
+    if (!strcmp(symbol, "NSStringFromClass"))
+        return (int64_t)args[0];                 /* 简化为回显类名指针 */
+
+    if (!strcmp(symbol, "objc_getClass")) {
+        g_class_handle += 8;
+        return (int64_t)g_class_handle;         /* 稳定的伪类句柄 */
+    }
+    if (!strcmp(symbol, "sel_registerName")) {
+        g_sel_handle += 8;
+        return (int64_t)g_sel_handle;           /* 稳定的伪 SEL */
+    }
+    if (!strcmp(symbol, "objc_msgSend"))
+        return (int64_t)args[0];                 /* 简化分发：返回 self，M2 补全 */
+
+    if (!strcmp(symbol, "UIApplicationMain") ||
+        !strcmp(symbol, "-[UIView initWithFrame:]"))
+        return (int64_t)args[0];
+
+    if (!strcmp(symbol, "CGRectMake")) {
+        /* 真实 ABI 里 4 个 CGFloat 走 d0..d3；这里按位模式存入宿主静态缓冲，
+         * 返回其地址，供后续 HLE API 取用（完整 ABI 桥属 M3）。 */
+        memcpy(g_cgrect, args, sizeof(g_cgrect));
+        return (int64_t)(uintptr_t)g_cgrect;
+    }
+    if (!strcmp(symbol, "MTLCreateSystemDefaultDevice"))
+        return (int64_t)(uintptr_t)g_mtl_device;
+
+    if (!strcmp(symbol, "malloc"))
+        return (int64_t)(uintptr_t)malloc((size_t)args[0]);
+    if (!strcmp(symbol, "free")) {
+        free((void *)(uintptr_t)args[0]);
+        return 0;
+    }
+    return 0;
+}

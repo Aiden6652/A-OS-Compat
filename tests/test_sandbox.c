@@ -58,5 +58,32 @@ int main(void) {
             "Metal→Vulkan 前端挂载成功");
     T_CHECK(aos_hle_metal_attach("") == AOS_ERR_INVALID_ARG, "空 ICD 名被拒绝");
 
+    /* ---- HLE 真实现（不再是空桩） ---- */
+    uint64_t h[6] = {0};
+    aos_hle_set_home("/tmp/aos_hle_home");
+    const char *got = (const char *)(uintptr_t)aos_hle_invoke("NSHomeDirectory", h);
+    T_CHECK(got && !strcmp(got, "/tmp/aos_hle_home"),
+            "NSHomeDirectory 真返回沙盒路径");
+    h[0] = (uint64_t)(uintptr_t)"测试 NSLog";
+    T_CHECK(aos_hle_invoke("NSLog", h) == 0, "NSLog 真输出且返回 0");
+    h[0] = 0x1234;
+    uint64_t c1 = (uint64_t)aos_hle_invoke("objc_getClass", h);
+    uint64_t c2 = (uint64_t)aos_hle_invoke("objc_getClass", h);
+    T_CHECK(c1 != 0 && c2 == c1 + 8, "objc_getClass 返回递增伪句柄");
+    T_CHECK(aos_hle_invoke("sel_registerName", h) != 0,
+            "sel_registerName 返回伪 SEL");
+    h[0] = 0x3FF0000000000000ULL; h[1] = 0x4000000000000000ULL;
+    h[2] = 0x4008000000000000ULL; h[3] = 0x4010000000000000ULL;
+    uint64_t *rect = (uint64_t *)(uintptr_t)aos_hle_invoke("CGRectMake", h);
+    T_CHECK(rect && rect[0] == h[0] && rect[3] == h[3],
+            "CGRectMake 真构造出结构体缓冲");
+    T_CHECK(aos_hle_invoke("MTLCreateSystemDefaultDevice", h) != 0,
+            "Metal 设备返回伪句柄");
+    h[0] = 64;
+    void *mem = (void *)(uintptr_t)aos_hle_invoke("malloc", h);
+    T_CHECK(mem != NULL, "malloc 真分配内存");
+    if (mem) { h[0] = (uint64_t)(uintptr_t)mem; (void)aos_hle_invoke("free", h); }
+    T_CHECK(aos_hle_invoke("__未知符号__", h) == 0, "未知 HLE 符号安全返回 0");
+
     T_REPORT("test_sandbox");
 }

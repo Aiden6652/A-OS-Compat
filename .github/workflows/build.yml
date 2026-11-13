@@ -36,7 +36,7 @@ jobs:
       - name: 用 CMake 配置构建目录
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: 编译全部目标（核心库 / 两个工具 / 五个测试）
+      - name: 编译全部目标（核心库 / 三个工具 / 六个测试）
         run: cmake --build build -j2
 
       - name: 运行全部单元测试
@@ -46,10 +46,10 @@ jobs:
       - name: 逐项打印测试断言统计
         run: |
           echo "── 各测试通过项统计 ──"
-          for t in test_macho test_jit test_syscall test_jailbreak test_sandbox; do
+          for t in test_macho test_jit test_syscall test_jailbreak test_sandbox test_exec; do
             ./build/$t | tail -1
           done
-          echo "── 共 5 个可执行测试，186 项断言 ──"
+          echo "── 共 6 个可执行测试，250 项断言 ──"
 
       - name: 验证 ARM64 汇编跳板可交叉汇编
         run: |
@@ -113,7 +113,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y cmake build-essential \
-              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu file
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+              qemu-user-static file
 
       - name: 用工具链文件配置交叉构建
         run: |
@@ -133,8 +134,23 @@ jobs:
 
       - name: 校验汇编跳板符号已纳入静态库
         run: |
-          echo "── 静态库中的上下文切换符号 ──"
+          echo "── 静态库中的上下文切换与陷阱桩符号 ──"
           aarch64-linux-gnu-nm build-a64/libaos_core.a | \
-              grep -E "aos_enter_guest|aos_restore_host|aos_trap_vector|aos_read_cntvct"
-          echo "校验通过：entry.S 的四个跳板符号均已链接进核心库"
-          echo "注意：交叉产物只构建、不运行（x86_64 宿主无法执行 aarch64 程序）"
+              grep -E "aos_enter_guest|aos_restore_host|aos_trap_vector|aos_read_cntvct|aos_guest_trap_handler"
+          echo "校验通过：entry.S 与 trampoline.S 的跳板符号均已链接进核心库"
+
+      - name: 用 qemu-aarch64 跑通执行闭环（aarch64 逻辑验证）
+        run: |
+          echo "── 说明 ──"
+          echo "qemu-user 只用于 CI 验证闭环逻辑，绝不进入产品运行路径；"
+          echo "真 ARM64 设备上 guest 的 arm64 指令由硬件原生执行，零指令转译。"
+          echo "── 执行两套内置样本 ──"
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+              ./build-a64/aos-run --selftest | tee /tmp/aos_run.log
+          echo "── 校验关键结果 ──"
+          grep -q "A-OS NATIVE OK" /tmp/aos_run.log
+          grep -q "guest 退出码 : 42" /tmp/aos_run.log
+          grep -q "guest 退出码 : 15" /tmp/aos_run.log
+          grep -q "HLE 实测" /tmp/aos_run.log
+          grep -q "两套样本全部通过" /tmp/aos_run.log
+          echo "闭环校验通过：write 真转发、返回值写回 x0、陷阱后继续执行、exit 码正确传出"

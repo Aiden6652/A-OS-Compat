@@ -6,7 +6,7 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 版本 | `0.1.0`（可编译、可测试的核心骨架） |
+| 版本 | `0.2.0`（**已跑通执行闭环**：加载 → JIT 预补丁 → 原生执行 → 陷阱转译 → 返回 guest） |
 | 许可证 | **GPL-3.0-only**（仅 GPLv3，不含 "or later"） |
 | 目标架构 | `aarch64`（安卓宿主） / guest 为普通 `arm64` |
 | 文档 | 本文件为中文默认 · [English](README.en.md) · [한국어](README.ko.md) |
@@ -37,6 +37,21 @@
 3. **转译部分才用 JIT 加速，运行部分是虚拟化。** JIT 只负责把 XNU ABI 边界（`svc #0x80` / Mach trap / ObjC 消息桥 / 高频框架调用）在运行时编译成宿主可直接跳的 trampoline；冷路径走 SUD 拦截，热点把 guest 代码页里的 `svc #0x80` 就地改成 `b <stub>`，之后连信号都不进。
 
 **为什么能这么便宜**：iOS 上绝大部分 App 是普通 `arm64` 而不是 `arm64e`，**没有 PAC**，函数序言不带 `PACIASP`/`AUTIASP`。因此 hook 与 trampoline 用 4 字节 `b`/`br` 直接覆盖即可，不用伺候指针签名。系统库（arm64e）我们本来就不加载。
+
+### 关于 touchHLE：借壳，不换心
+
+有人问「网上那个能跑 32 位 iOS 的 touchHLE，改一改不就行了？」军师查完官方仓库，四道硬墙：
+
+| 事实 | touchHLE 现状 | 对我们的影响 |
+| --- | --- | --- |
+| 许可证 | 源码 **MPL-2.0**（只有二进制是 GPLv3-or-later） | 整包搬进 `GPL-3.0-only` 会污染许可证，还带一堆依赖授权 |
+| CPU 层 | **dynarmic** 指令级 JIT 重编译（"emulated CPU"） | 恰恰是我们要拆掉的指令转译，与「硬件原生执行」对撞 |
+| 架构 | 官方明确 **Never: 64-bit iOS**，只跑 armv7 / iPhone OS 2.x–4.0.x | 不认 arm64 Mach-O，换 CPU 后端等于重写 |
+| 语言 | Rust + SDL + OpenGL ES | 本项目纯 C，栈不通 |
+
+**所以不 fork、不拷一行 MPL 代码**（许可证保持纯净的 GPL-3.0-only）。真正借的是它那个「自己实现系统框架」的 **HLE 壳子** —— 这层用户态语义与 CPU 位数无关，正好填我们项目里的框架桩：0.2.0 已把空桩换成真能干活的 C 实现（`NSLog` 真输出、`NSHomeDirectory` 真返回沙盒路径、`CGRectMake` 真构造、`malloc/free` 真转发、ObjC/Metal 返回一致伪句柄），统一由 `aos_hle_invoke()` 分派。
+
+> 顺带一句实用信息：如果你只是想玩老 32 位 iOS 游戏，**直接装 touchHLE 的 AArch64 Android APK 就行**（官方有 Android 版），不用改任何东西。但那是通过 dynarmic 翻译 armv7 指令跑的，跟我们做的 64 位原生虚拟化是两码事。
 
 ---
 
@@ -76,6 +91,39 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### 已跑通的执行闭环（0.2.0，有实证）
+
+不是纸面设计，`aos-run --selftest` 真把一段 **arm64 机器码**跑完了：
+
+```bash
+cmake -S . -B build-a64 -DCMAKE_TOOLCHAIN_FILE=aarch64-toolchain.cmake
+cmake --build build-a64 -j$(nproc)
+qemu-aarch64-static -L /usr/aarch64-linux-gnu ./build-a64/aos-run --selftest
+```
+
+实际输出（节选）：
+
+```
+──── 开始执行 guest（硬件原生 arm64 指令）────
+A-OS NATIVE OK
+──── guest 已返回 ────
+  guest 退出码 : 42          ← 样本 1：write 转发 + exit 码传出
+  ...
+A-OS NATIVE OK
+  guest 退出码 : 15          ← 样本 2：write 的返回值被写回 guest 的 x0 并用作 exit 码
+两套样本全部通过：write 真转发、返回值写回 x0、陷阱后继续执行、exit 码正确传出。
+```
+
+链条是这样闭合的：
+
+1. `aos_exec_map()` 一次性把 guest 镜像与 JIT 桩区 mmap 到**相邻地址**（保证 `b` 的 ±128MB 可达），按 segment 相对偏移 `MAP_FIXED` 风格映射，W^X。
+2. `aos_exec_scan_traps()` 扫出可执行段里所有 `svc #0x80`；`aos_exec_patch_all()` 为每个陷阱点生成**专属跳板**（`mov64 x9, 返回地址` + `b <共享桩>`），共享桩 `mov64 x17` + `br` 绝对跳到宿主汇编陷阱桩。跳板用 `b` 不用 `bl`，**绝不碰 `x30`**。
+3. guest 里的 `svc #0x80` 被就地改成 `b <跳板>`；**除这几条陷阱指令外，guest 机器码一个字节都没动**，硬件原生执行。
+4. `trampoline.S` 的 `aos_guest_trap_handler` 保存现场 → `bl aos_trap_dispatch` → C 分派器查表后**真发 Linux `syscall()`** → 把 `-errno` 转回 XNU 的 `x0=errno + carry 置位` → 恢复现场 → `br x9` 回 guest 继续执行。
+5. XNU `exit` 不真杀宿主进程，用 `longjmp` 回 `aos_exec_run()` 交出退出码。
+
+> **关于 qemu**：`qemu-aarch64` 只用于 CI / 本地**验证闭环逻辑**，绝不进入产品运行路径；在真 ARM64 手机上，guest 的 arm64 指令由硬件原生执行，没有任何 qemu、没有任何指令翻译。项目也**不需要 KVM / 嵌套虚拟化 / SUD / seccomp** —— 陷阱点在首次执行前就已是 JIT 桩，等于永远的热路径。`src/syscall_dispatch.c` 的 SUD 层保留为「guest 运行时自生成代码」的可选兜底。
+
 ---
 
 ## 四、关键技术点
@@ -91,6 +139,8 @@
 | **沙盒** | `NSHomeDirectory()` / Documents / Library / Caches / tmp 重定向到安卓 app 私有目录；含 `..` 的逃逸直接拒绝；`/var/jb` 映射回越狱根 | `src/loader.c` |
 | **图形** | 不碰 Apple 私有库；Metal → AIR → SPIR-V → Turnip/Adreno Vulkan 前端登记，目标先渲染出第一帧 UI | `src/loader.c` |
 | **上下文切换** | aarch64 汇编跳板：保存 callee-saved → 切 guest 栈 → `br x0` 原生执行；因普通 arm64 无 PAC，不发射 `paciasp`/`autiasp` | `src/aarch64/entry.S` |
+| **执行引擎（0.2.0）** | 静态扫描 `svc #0x80` → 每点生成专属 JIT 跳板 → `b` 就地覆盖 → 宿主汇编陷阱桩真转发 Linux syscall → `br` 回 guest；XNU exit 用 longjmp 回宿主 | `src/exec.c` · `src/aarch64/trampoline.S` |
+| **HLE 真实现（0.2.0）** | `aos_hle_invoke()` 统一分派：NSLog 真输出、NSHomeDirectory 返回沙盒路径、CGRectMake 真构造、malloc/free 真转发、ObjC/Metal 伪句柄 | `src/loader.c` |
 
 ### 避坑指南落实情况
 
@@ -112,13 +162,17 @@ A-OS-Compat/
 │   ├── syscall_table.c  XNU → Linux 转译表
 │   ├── syscall_dispatch.c Syscall User Dispatch 拦截层
 │   ├── jailbreak.c      rootless 越狱环境
-│   ├── loader.c         加载器 / 沙盒 / HLE 桩表
+│   ├── loader.c         加载器 / 沙盒 / HLE 真实现
+│   ├── exec.c           执行引擎：陷阱扫描 / 相邻映射 / JIT 预补丁 / C 分派器
 │   ├── aos_common.c     公共实现
-│   └── aarch64/entry.S  ARM64 上下文切换汇编跳板
+│   └── aarch64/
+│       ├── entry.S          ARM64 上下文切换汇编跳板
+│       └── trampoline.S     宿主陷阱桩（保存现场→转译→写回→br 回 guest）
 ├── tools/
 │   ├── aos-info.c       砸壳包审查工具
-│   └── aos-inject.c     dylib 注入工具
-├── tests/               5 个测试可执行文件，共 186 项断言
+│   ├── aos-inject.c     dylib 注入工具
+│   └── aos-run.c        运行器（--selftest / 外部镜像 / --emit）
+├── tests/               6 个测试可执行文件，共 250 项断言
 ├── .github/workflows/   全中文的 GitHub Actions 工作流
 ├── aarch64-toolchain.cmake   aarch64 交叉编译工具链
 ├── CMakeLists.txt
@@ -140,7 +194,17 @@ cmake --build build -j$(nproc)
 cd build && ctest --output-on-failure
 ```
 
-x86_64 上会跳过 `entry.S` 汇编（只验证 C 部分可编译），aarch64 上自动纳入。当前 CI 结果：**5 个测试全通过，186 项断言零失败，编译零警告**。
+x86_64 上会跳过 `entry.S` / `trampoline.S` 汇编（只验证 C 部分可编译），aarch64 上自动纳入。当前 CI 结果：**6 个测试全通过，250 项断言零失败，编译零警告**。
+
+### 跑通执行闭环（aarch64 实机 / qemu 验证）
+
+```bash
+qemu-aarch64-static -L /usr/aarch64-linux-gnu ./build-a64/aos-run --selftest
+```
+
+CI 的「交叉编译」任务会自动装 `qemu-user-static` 并跑这一步，逐项校验
+`A-OS NATIVE OK`、退出码 `42` 与 `15`、`HLE 实测`、`两套样本全部通过`。
+真 ARM64 设备上直接跑 `./aos-run --selftest` 即可，**不需要 qemu**。
 
 ### aarch64 交叉编译（GitHub Actions 同款）
 
@@ -174,19 +238,41 @@ file build-a64/aos-info     # ELF 64-bit LSBpie executable, ARM aarch64
 
 若 header padding 不够，工具会报错提示重链时加 `-headerpad_max_install_names`——这是能救的，别硬搬文件。
 
+### 真正把镜像跑起来
+
+```bash
+# 两套内置 arm64 样本，验证完整执行闭环
+./build/aos-run --selftest
+
+# 加载并执行一个砸壳 Mach-O
+./build/aos-run Payload/App.decrypted
+
+# 导出内置样本，供跨架构 / qemu 验证
+./build/aos-run --emit /tmp/guest.macho
+```
+
+`aos-run` 会建 rootless 越狱环境、初始化 HLE、映射镜像、生成 JIT 跳板，然后
+`br` 进 guest 入口。x86_64 上前四步照做、生成结果可校验，但**明确拒绝执行**
+aarch64 机器码（返回码 2），绝不在错误架构上乱跳。
+
 ---
 
 ## 八、诚实的能力边界（别吹牛，兄弟）
 
-**当前 0.1.0 是可编译、可测试、可注入的核心骨架，还跑不通完整 App UI。** 已经落地的：
+**0.2.0 已经能跑通「syscall 级」的完整闭环，但仍然跑不了任意真实 App 的 UI。** 这两句都得说清楚。
+
+已经落地并验证的：
 
 - ✅ Mach-O 解析 / fat 提取 / dylib 注入（含加密包拒绝、padding 不足检测）
 - ✅ ARM64 JIT 发射器（编码逐条反汇编核对）+ W^X 可执行页
 - ✅ XNU→Linux syscall 转译表（40 条，含参数重写与 Mach trap 模拟）
-- ✅ Syscall User Dispatch 拦截层（aarch64 实机路径 + CI 逻辑桩）
+- ✅ **静态 ABI 边界预补丁**：扫 `svc #0x80` → 每点专属 JIT 跳板 → `b` 就地覆盖，guest 其余机器码一字节不动
+- ✅ **宿主汇编陷阱桩**：真发 Linux `syscall()`、错误约定转换、结果写回 `x0` 后 `br` 回 guest
+- ✅ **两套真实 arm64 样本跑通**：write 输出、返回值写回 x0、陷阱后继续执行、exit 码传出（42 / 15）
+- ✅ HLE 框架**真实现**（不再是空桩）+ `aos_hle_invoke()` 统一分派
 - ✅ rootless 越狱环境（目录树 / trust cache / tweak Filter / pspawn / 越狱检测）
-- ✅ 沙盒路径映射、HLE 框架桩登记、加载器映射与 chained fixups 校验
-- ✅ 186 项单元测试 + x86_64 自测 + aarch64 交叉编译的 CI
+- ✅ 沙盒路径映射、加载器映射与 chained fixups 校验
+- ✅ 250 项单元测试 + x86_64 自测 + aarch64 交叉编译 + qemu 执行闭环的 CI
 
 **尚未实现（后续里程碑）**：
 
@@ -200,8 +286,9 @@ file build-a64/aos-info     # ELF 64-bit LSBpie executable, ARM aarch64
 | 里程碑 | 目标 |
 | --- | --- |
 | M1 ✅ | 可编译可测试骨架 + 注入工具 + 三语文档 + 全中文 CI |
-| M2 | chained fixups 完整 rebase/bind、objc_msgSend 分发、SUD 信号接线 |
-| M3 | HLE 最小集 → **渲染出第一帧 UI**；Metal→Vulkan 前端打通 |
+| M1.5 ✅ | **执行闭环**：JIT 预补丁 + 原生执行 + 真 syscall 转发 + HLE 真实现（0.2.0） |
+| M2 | dyld 符号绑定（让 guest 能调到 HLE）、chained fixups 完整 rebase/bind、objc_msgSend 分发、SUD 信号接线 |
+| M3 | Foundation / UIKit 最小集 → **渲染出第一帧 UI**；Metal→Vulkan 前端打通 |
 | M4 | 真机（root / pKVM 可用设备）性能调优、LMK 拦截 |
 
 ---

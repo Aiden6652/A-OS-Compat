@@ -86,6 +86,17 @@ const char *aos_hle_framework_name(aos_hle_framework_t fw);
  * 参考 UniXNU 已验证的链路：Metal/AIR → SPIR-V → Turnip(Mesa Vulkan/Adreno) */
 int aos_hle_metal_attach(const char *vulkan_icd_name);
 
+/* ---- HLE 框架的真实现入口 ----
+ * 不加载 Apple 的 dyld_shared_cache，自己实现 App 会调用到的框架 API。
+ * 宿主侧、以及后续 dyld 符号绑定完成后 guest 的框架调用，统一走这里。
+ * args[0..5] 对应 x0..x5，返回值写回 x0。
+ * 思路借鉴 touchHLE 的「自己提供系统框架」HLE 架构，但代码为本项目自研 C 实现，
+ * 不含任何 MPL 授权代码，许可证保持纯 GPL-3.0-only。 */
+int64_t aos_hle_invoke(const char *symbol, uint64_t args[6]);
+
+/* 设置 NSHomeDirectory() 返回的模拟 App Home（由沙盒初始化时注入） */
+void aos_hle_set_home(const char *home);
+
 #ifdef __cplusplus
 }
 #endif

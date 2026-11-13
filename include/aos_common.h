@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define AOS_VERSION_STRING "0.1.0"
+#define AOS_VERSION_STRING "0.2.0"
 
 /* ---- 返回码 ---- */
 enum aos_status {
