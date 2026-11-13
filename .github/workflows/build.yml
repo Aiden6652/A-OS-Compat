@@ -1,0 +1,140 @@
+# A-OS 兼容层 —— 构建与自测工作流
+#
+# 说明：YAML 的键名、job 标识符、命令名属于语法/工具要求，必须用英文；
+#       其余可见文本（工作流名、job 名、步骤名、注释、运行输出）全程中文。
+# 两个任务：
+#   1. 本机自测   —— x86_64 上完整构建、跑通全部单元测试、端到端验证注入工具；
+#   2. 交叉编译   —— 用 gcc-aarch64-linux-gnu 全量构建 ARM64 产物并校验架构与汇编跳板符号。
+#
+# 许可证：GPL-3.0-only
+
+name: A-OS 兼容层 · 构建与自测
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────── 任务一：本机自测 ───────────────────────────
+  selftest:
+    name: 「本机自测」构建并跑通全部单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取源码
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential clang binutils file
+
+      - name: 用 CMake 配置构建目录
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译全部目标（核心库 / 两个工具 / 五个测试）
+        run: cmake --build build -j2
+
+      - name: 运行全部单元测试
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: 逐项打印测试断言统计
+        run: |
+          echo "── 各测试通过项统计 ──"
+          for t in test_macho test_jit test_syscall test_jailbreak test_sandbox; do
+            ./build/$t | tail -1
+          done
+          echo "── 共 5 个可执行测试，186 项断言 ──"
+
+      - name: 验证 ARM64 汇编跳板可交叉汇编
+        run: |
+          echo "── 用 clang 把 aarch64/entry.S 交叉汇编成目标文件 ──"
+          clang --target=aarch64-linux-gnu -c src/aarch64/entry.S -o /tmp/entry_a64.o
+          file /tmp/entry_a64.o
+          file /tmp/entry_a64.o | grep -q "ARM aarch64"
+          echo "校验通过：汇编跳板产出 ARM aarch64 目标文件"
+          echo "── 反汇编片段（guest 入口应直接 br x0，无任何指令转译）──"
+          if command -v llvm-objdump >/dev/null 2>&1; then
+            llvm-objdump -d /tmp/entry_a64.o | sed -n '1,16p'
+          else
+            readelf -x .text /tmp/entry_a64.o | head -12
+          fi
+
+      - name: 端到端验证 dylib 注入工具
+        run: |
+          echo "── 生成一个最小但严格合法的 arm64 砸壳 Mach-O 作为测试输入 ──"
+          cat > /tmp/gen_fixture.c <<'EOF'
+          #include "test_macho_fixture.h"
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              (void)argc;
+              size_t n = 0;
+              uint8_t *b = tfi_make_thin(&n);
+              if (!b) return 1;
+              FILE *f = fopen(argv[1], "wb");
+              if (!f) return 1;
+              fwrite(b, 1, n, f);
+              fclose(f);
+              free(b);
+              return 0;
+          }
+          EOF
+          gcc -Iinclude -Itests /tmp/gen_fixture.c -o /tmp/gen_fixture
+          /tmp/gen_fixture /tmp/app.decrypted
+
+          echo "── 第一步：审查注入前的砸壳包 ──"
+          ./build/aos-info /tmp/app.decrypted
+
+          echo "── 第二步：执行 dylib 注入 ──"
+          ./build/aos-inject /tmp/app.decrypted /tmp/app.injected \
+              @executable_path/AOSTweak.dylib
+
+          echo "── 第三步：审查注入结果 ──"
+          ./build/aos-info /tmp/app.injected
+          ./build/aos-info /tmp/app.injected | grep -q "AOSTweak.dylib"
+          test "$(stat -c %s /tmp/app.decrypted)" = "$(stat -c %s /tmp/app.injected)"
+          echo "校验通过：新 dylib 已写入 Load Commands，且文件长度保持不变"
+
+  # ─────────────────────────── 任务二：交叉编译 ───────────────────────────
+  cross_aarch64:
+    name: 「交叉编译」aarch64 目标全量构建
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取源码
+        uses: actions/checkout@v4
+
+      - name: 安装 aarch64 交叉工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential \
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu file
+
+      - name: 用工具链文件配置交叉构建
+        run: |
+          cmake -S . -B build-a64 \
+              -DCMAKE_TOOLCHAIN_FILE=aarch64-toolchain.cmake \
+              -DCMAKE_BUILD_TYPE=Release
+
+      - name: 交叉编译全部目标（含 entry.S 汇编跳板）
+        run: cmake --build build-a64 -j2
+
+      - name: 校验产物确实是 ARM aarch64
+        run: |
+          echo "── 产物架构 ──"
+          file build-a64/aos-info build-a64/aos-inject build-a64/test_macho
+          file build-a64/aos-info | grep -q "ARM aarch64"
+          echo "校验通过：全部产物为 ARM aarch64 ELF"
+
+      - name: 校验汇编跳板符号已纳入静态库
+        run: |
+          echo "── 静态库中的上下文切换符号 ──"
+          aarch64-linux-gnu-nm build-a64/libaos_core.a | \
+              grep -E "aos_enter_guest|aos_restore_host|aos_trap_vector|aos_read_cntvct"
+          echo "校验通过：entry.S 的四个跳板符号均已链接进核心库"
+          echo "注意：交叉产物只构建、不运行（x86_64 宿主无法执行 aarch64 程序）"

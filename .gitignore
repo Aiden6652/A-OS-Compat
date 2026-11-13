@@ -1,0 +1,19 @@
+# 构建产物
+build/
+build-a64/
+*.o
+*.a
+*.so
+
+# 运行时自动生成的 rootless 越狱环境
+aos_root/
+
+# 本地测试用砸壳包 / 注入产物
+*.decrypted
+*.injected
+*.cdhash
+
+# 编辑器与系统杂项
+.vscode/
+.idea/
+.DS_Store
