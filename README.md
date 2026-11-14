@@ -6,7 +6,7 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 版本 | `0.2.0`（**已跑通执行闭环**：加载 → JIT 预补丁 → 原生执行 → 陷阱转译 → 返回 guest） |
+| 版本 | `0.3.0`（执行闭环 + **可安装的 Android APK**：加载 → JIT 预补丁 → 原生执行 → 陷阱转译 → 返回 guest） |
 | 许可证 | **GPL-3.0-only**（仅 GPLv3，不含 "or later"） |
 | 目标架构 | `aarch64`（安卓宿主） / guest 为普通 `arm64` |
 | 文档 | 本文件为中文默认 · [English](README.en.md) · [한국어](README.ko.md) |
@@ -302,3 +302,34 @@ aarch64 机器码（返回码 2），绝不在错误架构上乱跳。
 ---
 
 > 军师按：内核不用扒，PAC 不用管，AMFI 不用绕。硬件同源这一条，就是整个方案最大的便宜。
+
+---
+
+## 十、Android APK（0.3.0 新增，真能装进手机）
+
+之前 0.2.0 的 CMake 产出的是 **Linux ELF 可执行文件 + 静态库**，能编译、能用 qemu 验证闭环，但**装不进手机** —— 缺的是 `NDK → .so → aapt2 → apksigner` 这一整条 Android 打包链。0.3.0 把它补上了。
+
+**一键打包**（需要 Android SDK 的 build-tools/platform、NDK r25+、JDK、cmake、zip）：
+
+```bash
+export ANDROID_HOME=/path/to/android-sdk
+./android/build-apk.sh
+# 产物：./A-OS-Compat-arm64-v8a-debug.apk
+```
+
+五步链路：① NDK 把同一套 C 源码 + aarch64 汇编跳板编成 `lib/arm64-v8a/libaos_compat.so`；② `aapt2` 用 `android/app/src/main/AndroidManifest.xml` 生成基础 APK；③ 把 `.so` 塞进 APK 的 `lib/`；④ `zipalign` 4 字节对齐；⑤ `apksigner` 用自签 debug keystore 做 **v1+v2+v3** 签名。
+
+**应用形态**：纯 `NativeActivity`（`android:hasCode="false"`），APK 里没有 `classes.dex`，也不需要一行 Java —— 系统直接 `dlopen` 我们的 `.so` 并调 `ANativeActivity_onCreate`。少一层 JNI 就少一次 ABI 边界开销。只发布 `arm64-v8a`，因为 iOS 砸壳包是 arm64 机器码。
+
+**装上之后**：
+
+```bash
+adb install -r A-OS-Compat-arm64-v8a-debug.apk
+adb logcat -s A-OS:V A-OS-GUEST:V
+```
+
+启动会建 rootless 越狱环境、跑两套内置 arm64 样本（退出码 42 / 15）、把 `A-OS NATIVE OK` 打到 logcat（guest 的 stdout 在 Android 上默认不可见，所以 `aos_trap_dispatch` 把 `write(1/2, ...)` 旁路到 `A-OS-GUEST` tag），并在 `ANativeWindow` 上直接提交第一帧。
+
+**换成自己的砸壳包**：把脱壳后的 Mach-O 命名为 `payload.decrypted` 放进 `android/app/src/main/assets/`，重新跑 `build-apk.sh`，App 会优先加载它。CI 的第三个 job 会自动产出并上传这个 APK（Actions → Artifacts）。
+
+debug 签名是自签的，安装时系统可能提示「未知来源」，允许即可。边界照旧：**跑通的是 syscall 级闭环，还跑不了任意真实 App 的 UI**。

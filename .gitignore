@@ -1,9 +1,13 @@
 # 构建产物
 build/
 build-a64/
+build-android/
 *.o
 *.a
 *.so
+*.apk
+*.apk.idsig
+*.keystore
 
 # 运行时自动生成的 rootless 越狱环境
 aos_root/

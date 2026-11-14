@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A-OS 兼容层 —— Android 应用清单
+  纯 NativeActivity：android:hasCode="false"，APK 里不需要 classes.dex，
+  系统直接 dlopen libaos_compat.so 并调用 ANativeActivity_onCreate。
+
+  为什么用 NativeActivity：兼容层是纯 C + aarch64 汇编，不需要 Java 层；
+  少一层 JNI 反而少一次 ABI 边界开销。
+  许可证：GPL-3.0-only
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="cn.aiden.aoscompat"
+    android:versionCode="3"
+    android:versionName="0.3.0">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+
+    <!-- 只发布 arm64-v8a：iOS 砸壳包是 arm64 机器码，32 位设备没有价值 -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="false" />
+
+    <application
+        android:label="A-OS 兼容层"
+        android:hasCode="false"
+        android:allowBackup="false"
+        android:extractNativeLibs="true">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="A-OS 兼容层"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode|navigation">
+
+            <!-- 系统据此 dlopen libaos_compat.so -->
+            <meta-data android:name="android.app.lib_name" android:value="aos_compat" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

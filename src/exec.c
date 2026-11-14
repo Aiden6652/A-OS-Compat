@@ -18,6 +18,9 @@
 #include <string.h>
 #include <setjmp.h>
 #include <errno.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 typedef struct {
     uint64_t vmaddr, vmsize, fileoff, filesize;
@@ -244,6 +247,19 @@ int aos_exec_patch_all(aos_exec_t *ex, const aos_macho_image_t *img,
 int64_t aos_trap_dispatch(int64_t nr, uint64_t args[6]) {
     g_trap_count++;
     int64_t norm = (nr < 0) ? nr : (int64_t)((uint64_t)nr & 0x00FFFFFFu);
+
+#ifdef __ANDROID__
+    /* Android App 的 stdout 默认不可见：把 guest 的 write(1/2, ...) 旁路到
+     * logcat（tag = A-OS-GUEST）。Linux syscall 仍然照常真转发，guest 语义不变。 */
+    if (norm == 4 && (args[0] == 1 || args[0] == 2) &&
+        args[1] != 0 && args[2] > 0 && args[2] < 4096) {
+        char line[4096];
+        size_t n = (size_t)args[2];
+        memcpy(line, (const void *)(uintptr_t)args[1], n);
+        line[n] = '\0';
+        __android_log_print(ANDROID_LOG_INFO, "A-OS-GUEST", "%s", line);
+    }
+#endif
 
     /* XNU exit(1)：绝不能真把宿主进程干掉，longjmp 回 aos_exec_run */
     if (norm == 1) {

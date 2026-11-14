@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define AOS_VERSION_STRING "0.2.0"
+#define AOS_VERSION_STRING "0.3.0"
 
 /* ---- 返回码 ---- */
 enum aos_status {
@@ -33,10 +33,19 @@ enum aos_status {
     AOS_ERR_NOT_FOUND     = -9
 };
 
-/* ---- 全中文日志 ---- */
+/* ---- 全中文日志 ----
+ * 桌面端走 stdout/stderr；Android App 的 stdout 默认不可见，
+ * 所以 NDK 构建时统一转到 logcat（tag = A-OS），adb logcat 才能看到。 */
+#ifdef __ANDROID__
+#include <android/log.h>
+#define AOS_LOG_INFO(fmt, ...) __android_log_print(ANDROID_LOG_INFO,  "A-OS", "[军师·信息] " fmt, ##__VA_ARGS__)
+#define AOS_LOG_WARN(fmt, ...) __android_log_print(ANDROID_LOG_WARN,  "A-OS", "[军师·警告] " fmt, ##__VA_ARGS__)
+#define AOS_LOG_FAIL(fmt, ...) __android_log_print(ANDROID_LOG_ERROR, "A-OS", "[军师·骂娘] " fmt, ##__VA_ARGS__)
+#else
 #define AOS_LOG_INFO(fmt, ...)  do { fprintf(stdout, "[军师·信息] " fmt "\n", ##__VA_ARGS__); } while (0)
 #define AOS_LOG_WARN(fmt, ...)  do { fprintf(stderr, "[军师·警告] " fmt "\n", ##__VA_ARGS__); } while (0)
 #define AOS_LOG_FAIL(fmt, ...)  do { fprintf(stderr, "[军师·骂娘] " fmt "\n", ##__VA_ARGS__); } while (0)
+#endif
 
 /* ---- 显式的定宽小端读取 ----
  * 砸壳 Mach-O 与安卓 ARM64 都是小端；但 CI 跑在 x86_64、且不允许用结构体强转

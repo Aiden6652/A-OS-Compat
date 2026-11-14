@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 | --- | --- |
-| 버전 | `0.2.0` (**실행 루프 동작**: 로드 → JIT 사전 패치 → 네이티브 실행 → 트랩 변환 → 게스트 복귀) |
+| 버전 | `0.3.0` (실행 루프 + **설치 가능한 Android APK**: 로드 → JIT 사전 패치 → 네이티브 실행 → 트랩 변환 → 게스트 복귀) |
 | 라이선스 | **GPL-3.0-only** (GPLv3 한정, "or later" 없음) |
 | 아키텍처 | 호스트 `aarch64` 안드로이드 / 게스트 일반 `arm64` |
 | 문서 | [中文 (기본)](README.md) · [English](README.en.md) · 한국어 |
@@ -206,3 +206,34 @@ x86_64에서도 파싱·매핑·JIT 스텁 생성까지는 수행하며(바이�
 본 프로젝트는 **GPL-3.0-only** (GNU GPL v3.0 한정, "or later" 없음)를 따릅니다. 전문은 [LICENSE](LICENSE)를 참고하십시오. 파생 저작물은 동일 라이선스로 공개해야 합니다.
 
 본 프로젝트는 **본인이 적법하게 보유하고 직접 복호화한 IPA에 대한 기술 연구**만을 위한 것입니다. 거주 지역의 법령과 앱 라이선스 계약을 준수하십시오. 프로젝트는 Apple의 비공개 프레임워크, 시스템 라이브러리, 저작권 보호 바이너리를 포함하거나 배포하지 않습니다.
+
+---
+
+## 9. Android APK (0.3.0 신규, 실제로 설치 가능)
+
+0.2.0의 CMake 산출물은 **Linux ELF 실행 파일과 정적 라이브러리**였습니다. 컴파일과 qemu 검증은 가능했지만 **휴대폰에 설치할 수는 없었습니다.** 빠져 있던 것은 `NDK → .so → aapt2 → apksigner`로 이어지는 Android 패키징 체인 전체였고, 0.3.0에서 보완했습니다.
+
+**원커맨드 빌드** (Android SDK build-tools/platform, NDK r25+, JDK, cmake, zip 필요):
+
+```bash
+export ANDROID_HOME=/path/to/android-sdk
+./android/build-apk.sh
+# 결과: ./A-OS-Compat-arm64-v8a-debug.apk
+```
+
+다섯 단계: ① NDK가 동일한 C 소스와 aarch64 어셈블리 트램펄린을 `lib/arm64-v8a/libaos_compat.so`로 컴파일, ② `aapt2`가 `android/app/src/main/AndroidManifest.xml`로 기본 APK 생성, ③ `.so`를 `lib/`에 추가, ④ `zipalign` 4바이트 정렬, ⑤ `apksigner`가 자체 생성 debug keystore로 **v1+v2+v3** 서명.
+
+**앱 형태**: 순수 `NativeActivity` (`android:hasCode="false"`). `classes.dex`도 Java 코드도 없으며, 시스템이 우리 `.so`를 `dlopen`하고 `ANativeActivity_onCreate`를 직접 호출합니다. JNI 계층이 하나 줄어드는 만큼 ABI 경계도 하나 줄어듭니다. 복호화된 iOS 페이로드가 arm64 머신코드이므로 `arm64-v8a`만 배포합니다.
+
+**설치 후**:
+
+```bash
+adb install -r A-OS-Compat-arm64-v8a-debug.apk
+adb logcat -s A-OS:V A-OS-GUEST:V
+```
+
+시작 시 rootless 탈옥 환경을 구축하고, 내장 arm64 샘플 두 개(종료 코드 42 / 15)를 실행하며, `A-OS NATIVE OK`를 logcat에 출력합니다(Android에서는 게스트 stdout이 보이지 않으므로 `aos_trap_dispatch`가 `write(1/2, ...)`를 `A-OS-GUEST` 태그로 미러링합니다). 그리고 `ANativeWindow`에 첫 프레임을 직접 제출합니다.
+
+**직접 복호화한 페이로드 사용**: 탈옥한 Mach-O를 `payload.decrypted`로 이름 지어 `android/app/src/main/assets/`에 넣고 `build-apk.sh`를 다시 실행하면 앱이 이를 우선 로드합니다. 세 번째 CI job이 APK를 자동 생성·업로드합니다(Actions → Artifacts).
+
+debug 서명은 자체 서명이므로 설치 시 "알 수 없는 출처" 경고가 나올 수 있으며 허용하면 됩니다. 경계는 그대로입니다: **syscall 수준 루프이며, 아직 임의의 실제 앱 UI는 실행하지 못합니다.**

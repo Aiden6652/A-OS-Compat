@@ -168,3 +168,55 @@ jobs:
           grep -q "HLE 实测" /tmp/aos_run.log
           grep -q "两套样本全部通过" /tmp/aos_run.log
           echo "闭环校验通过：write 真转发、返回值写回 x0、陷阱后继续执行、exit 码正确传出"
+
+  # ─────────────────────────── 任务三：产出可安装 APK ───────────────────────────
+  build_apk:
+    name: 「安卓打包」产出可安装 APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取源码
+        uses: actions/checkout@v4
+
+      - name: 准备 Android SDK 与 NDK
+        run: |
+          echo "── runner 预装的 Android SDK ──"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1
+          ls -d "$ANDROID_HOME"/platforms/android-*/ | sort -V | tail -1
+          NDK="$(ls -d "$ANDROID_HOME"/ndk/*/ 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "$NDK" ]; then
+            echo "runner 未预装 NDK，改用 sdkmanager 安装"
+            SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            if [ ! -x "$SM" ]; then SM="$(command -v sdkmanager)"; fi
+            yes | "$SM" --licenses > /dev/null 2>&1 || true
+            "$SM" --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+            NDK="$ANDROID_HOME/ndk/27.0.12077973"
+          fi
+          echo "ANDROID_NDK_HOME=${NDK%/}" >> "$GITHUB_ENV"
+
+      - name: 安装打包依赖
+        run: sudo apt-get update -qq && sudo apt-get install -y cmake zip unzip file
+
+      - name: 一键打包（NDK → .so → aapt2 → zipalign → apksigner）
+        run: |
+          chmod +x android/build-apk.sh
+          ./android/build-apk.sh
+
+      - name: 校验 APK 内容与签名
+        run: |
+          APK=A-OS-Compat-arm64-v8a-debug.apk
+          echo "── APK 内容 ──"
+          unzip -l "$APK" | grep -E "AndroidManifest.xml|libaos_compat.so|assets/README.txt"
+          echo "── 签名校验（v1+v2+v3）──"
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          "${BT%/}"/apksigner verify --verbose "$APK"
+          echo "── 清单信息 ──"
+          "${BT%/}"/aapt2 dump badging "$APK" | \
+              grep -E "^package:|sdkVersion|native-code|launchable-activity"
+
+      - name: 上传 APK 成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: A-OS-Compat-arm64-v8a-debug
+          path: A-OS-Compat-arm64-v8a-debug.apk
+          if-no-files-found: error

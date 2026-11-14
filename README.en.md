@@ -6,7 +6,7 @@
 
 | | |
 | --- | --- |
-| Version | `0.2.0` (**execution loop working**: load → JIT pre-patch → native execution → trap translation → return to guest) |
+| Version | `0.3.0` (execution loop **plus an installable Android APK**: load → JIT pre-patch → native execution → trap translation → return to guest) |
 | License | **GPL-3.0-only** (GPLv3 only, no "or later") |
 | Architectures | Host `aarch64` Android / guest plain `arm64` |
 | Docs | [中文 (default)](README.md) · English · [한국어](README.ko.md) |
@@ -206,3 +206,34 @@ Not yet implemented: full bind/opcode interpretation for `LC_DYLD_CHAINED_FIXUPS
 Licensed **GPL-3.0-only** (GNU GPL v3.0 only, without "or later"); see [LICENSE](LICENSE). Derivative works must be released under the same license.
 
 This project is for **research on IPAs you legally own and have decrypted yourself**. Comply with your local laws and app license agreements. The project contains and distributes no Apple private frameworks, system libraries, or copyrighted binaries.
+
+---
+
+## 9. Android APK (new in 0.3.0, actually installable)
+
+0.2.0's CMake produced **Linux ELF executables and a static library** — compilable, verifiable under qemu, but **not installable on a phone**. What was missing was the whole Android packaging chain: `NDK → .so → aapt2 → apksigner`. 0.3.0 adds it.
+
+**One-command build** (needs Android SDK build-tools/platform, NDK r25+, a JDK, cmake, zip):
+
+```bash
+export ANDROID_HOME=/path/to/android-sdk
+./android/build-apk.sh
+# output: ./A-OS-Compat-arm64-v8a-debug.apk
+```
+
+Five steps: (1) NDK compiles the same C sources plus aarch64 assembly stubs into `lib/arm64-v8a/libaos_compat.so`; (2) `aapt2` links `android/app/src/main/AndroidManifest.xml` into a base APK; (3) the `.so` is added under `lib/`; (4) `zipalign` aligns to 4 bytes; (5) `apksigner` signs with a self-generated debug keystore using **v1+v2+v3**.
+
+**App shape**: a pure `NativeActivity` (`android:hasCode="false"`). There is no `classes.dex` and no Java at all — the system `dlopen`s our `.so` and calls `ANativeActivity_onCreate` directly. One less JNI layer means one less ABI boundary. Only `arm64-v8a` is shipped, because decrypted iOS payloads are arm64 machine code.
+
+**After installing**:
+
+```bash
+adb install -r A-OS-Compat-arm64-v8a-debug.apk
+adb logcat -s A-OS:V A-OS-GUEST:V
+```
+
+Startup builds the rootless jailbreak environment, runs the two built-in arm64 samples (exit codes 42 / 15), prints `A-OS NATIVE OK` to logcat (guest stdout is invisible on Android, so `aos_trap_dispatch` mirrors `write(1/2, ...)` to the `A-OS-GUEST` tag), and posts a first frame directly to `ANativeWindow`.
+
+**Use your own payload**: name the decrypted Mach-O `payload.decrypted`, drop it into `android/app/src/main/assets/`, rerun `build-apk.sh`; the app loads it preferentially. The third CI job produces and uploads the APK automatically (Actions → Artifacts).
+
+The debug signature is self-signed, so Android may warn about an unknown source — allow it. The boundary is unchanged: **this is a syscall-level loop, not yet an arbitrary real app's UI**.

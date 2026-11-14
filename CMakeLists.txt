@@ -1,7 +1,7 @@
 # A-OS 兼容层 —— 构建脚本（注释全中文）
 # 许可证：GPL-3.0-only
 cmake_minimum_required(VERSION 3.16)
-project(A-OS-Compat VERSION 0.2.0 LANGUAGES C ASM)
+project(A-OS-Compat VERSION 0.3.0 LANGUAGES C ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
